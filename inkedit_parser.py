@@ -2,8 +2,8 @@
 
 __description__ = 'Parse Form Control data using oletools.oleform and print properties in /f for inkedit form controls'
 __author__ = 'Jon Armer'
-__version__ = '0.0.2'
-__date__ = '2020/02/08'
+__version__ = '0.0.3'
+__date__ = '2020/02/09'
 
 """
 
@@ -30,7 +30,7 @@ import olefile
 from oletools.oleform import *
 import argparse
 
-def consume_inkeditControl(stream):
+class inkeditControl():
     PROPERTY_LIST = {"apperance" : ["0 - rtfFlat", "1 - rtfThreeD"], 
                      "borderStyle" : ["0 - rtfNoBorder", "1 - rtfFixedSingle"],
                      "InkInsertMode" : ["0 - IEM_InsertText", "1 - IEM_InsertInk"],
@@ -41,54 +41,83 @@ def consume_inkeditControl(stream):
                                        "12 - IMP_ArrowQuestion", "13 - IMP_SizeAll", "14 - IMP_Hand", "99 - IMP_Custom"],
                      "ScrollBars" : ["0 - rtfNone", "1 - rtfHorizontal", "2 - rtfVertical", "3 - rtfBoth"]}
     
-    # stream.check_values('LabelControl (versions)', '<BB', 2, (0, 2))
-    inkedit_data = {}
+    inkedit_fields = [("version", "<h", 2), ("cbClassTable", "<h", 2), ("PropMask", "<i", 4), ("data_size", "<i", 4), 
+                                         ("unkown_1", "<i", 4), ("unkown_2", "<i", 4), ("width", "<i", 4), ("height", "<i", 4), 
+                                         ("backColor", "<i", 4), ("apperance", "<i", 4, "prop"), ("borderStyle", "<i", 4, "prop"), 
+                                         ("MousePointer", "<i", 4, "prop"), ("InkMode", "<i", 4, "prop"), ("InkInsertMode", "<i", 4, "prop"),
+                                         ("RecognTimeOut", "<i", 4), ("Locked", "<h", 2, "bool"), ("MultiLine", "<h", 2, "bool"), 
+                                         ("disableNoScroll", "<h", 2, "bool"), ("padding", "<bb", 2), ("ScrollBars", "<i", 4, "prop"),
+                                         ("Enabled", "<h", 2, "bool"), ("padding", "<bb", 2), ("MaxLength", "<i", 4), ("UseMouseForInput", "<h", 2, "bool"), 
+                                         ("padding", "<bbbbbb", 6), ("factorid", "<i", 4, "unicode"), ("mouseIcon", "<i", 4, "image"),
+                                         ("font", "h", 4, "font"), ("rtf_data", "<i", 4, "rtf")]
 
-    inkedit_data["version"] = stream.unpack("<h", 2)
-    inkedit_data["cbClassTable"] = stream.unpack("<h", 2)
-    inkedit_data["PropMask"] = stream.unpack("<i", 4)
-        
-    inkedit_data["data_size"] = stream.unpack("<i", 4)
-    unkown_1 = stream.unpack("<i", 4)
-    unkown_2 = stream.unpack("<i", 4)
-    inkedit_data["width"] = stream.unpack("<i", 4)
-    inkedit_data["height"] = stream.unpack("<i", 4)
-    inkedit_data["backColor"] = hex(stream.unpack("<I", 4))
-    inkedit_data["apperance"] = PROPERTY_LIST["apperance"][stream.unpack("<i", 4)] 
-    inkedit_data["borderStyle"] = PROPERTY_LIST["borderStyle"][stream.unpack("<i", 4)]
-    inkedit_data["MousePointer"] = PROPERTY_LIST["MousePointer"][stream.unpack("<i", 4)]
-    inkedit_data["InkMode"] = PROPERTY_LIST["InkMode"][stream.unpack("<i", 4)]
-    inkedit_data["InkInsertMode"] = PROPERTY_LIST["InkInsertMode"][stream.unpack("<i", 4)]
-    inkedit_data["RecognTimeOut"] = stream.unpack("<i", 4)
-    inkedit_data["Locked"] = stream.unpack("<h", 2) > 0
-    inkedit_data["MultiLine"] = stream.unpack("<h", 2) > 0
-    inkedit_data["disableNoScroll"] = stream.unpack("<h", 2) > 0
-    poss_padding = stream.unpack("<h", 2)
-    inkedit_data["ScrollBars"] = PROPERTY_LIST["ScrollBars"][stream.unpack("<i", 4)]
-    inkedit_data["Enabled"] = stream.unpack("<h", 2)
-    poss_padding = stream.unpack("<h", 2)
-    inkedit_data["MaxLength"] = stream.unpack("<i", 4)
-    inkedit_data["UseMouseForInput"] = stream.unpack("<h", 2)
-    poss_padding = stream.read(6)
-    factorid_size = stream.unpack("<i", 4)
-    inkedit_data["factorid"] = stream.read(factorid_size).replace("\x00", "") # remove null chars
-    mouseIcon_size = stream.unpack("<i", 4)
-    if mouseIcon_size > 0:
-        inkedit_data["mouseIcon"] = stream.read(mouseIcon_size)
-    else:
-        inkedit_data["mouseIcon"] = None
-    font_data_size = stream.unpack("<i", 4)
-    inkedit_data["font_data"] = stream.read(font_data_size)
-    fontname_size = struct.unpack(">h", inkedit_data["font_data"][9:11])[0]
-    inkedit_data["fontname"] = inkedit_data["font_data"][11:11+fontname_size]
+    property_values = {}
+    
+    def __init__(self, stream):
+        for field in inkedit_fields:
+            field_value = stream.unpack(field[1], field[2])
+            if len(field) == 3:
+                property_values[field[0]] = field_value
+            else:
+                if field[3] == "bool":
+                    property_values[field[0]] = field_value > 0
+                if field[3] == "unicode":
+                   unicodedata = stream.read(field_value)
+                    property_values[field[0]] = unicodedata.replace("\x00", "")
+                elif field[3] == "prop":
+                    property_values[field[0]] = PROPERTY_LIST["apperance"][field_value]
+                elif field[3] == "font":
+                    fontdata = stream.read(field_value)
+                    property_values["fontdata"] = fontdata
+                    fontname_size = struct.unpack(">h", field_value[9:11])[0]  # TODO add in font parsing
+                    property_values["fontname"] = field_value[11:11+fontname_size]
+                elif field[3] == "rtf":
+                    rtf_data_size = stream.unpack("<i", 4)
+                    property_values["rtf_data"] = stream.read(rtf_data_size).replace("\x00", "") # remove null chars
+                    beginning_text = property_values["rtf_data"].find("\\fs16 ") + 6 # TODO add option to use actual RTF parser
+                    end_text = property_values["rtf_data"][beginning_text:].find("\\par")
+                    property_values["text"] = property_values["rtf_data"][beginning_text:beginning_text + end_text]
+                elif field[3] == "image":
+                property_values[field[0]] = field_value
+                    
+
+
     rtf_data_size = stream.unpack("<i", 4)
     inkedit_data["rtf_data"] = stream.read(rtf_data_size).replace("\x00", "") # remove null chars
 
-    beginning_text = inkedit_data["rtf_data"].find("\\fs16 ") + 6 # TODO add option to use actual RTF parser
-    end_text = inkedit_data["rtf_data"][beginning_text:].find("\\par")
-    inkedit_data["text"] = inkedit_data["rtf_data"][beginning_text:beginning_text + end_text]
 
-    print inkedit_data
+#     fontname_size = struct.unpack(">h", inkedit_data["font_data"][9:11])[0]
+#     inkedit_data["fontname"] = inkedit_data["font_data"][11:11+fontname_size]
+
+#    beginning_text = inkedit_data["rtf_data"].find("\\fs16 ") + 6 # TODO add option to use actual RTF parser
+#    end_text = inkedit_data["rtf_data"][beginning_text:].find("\\par")
+#    inkedit_data["text"] = inkedit_data["rtf_data"][beginning_text:beginning_text + end_text]
+
+def consume_inkeditControl(stream):
+    # stream.check_values('LabelControl (versions)', '<BB', 2, (0, 2))
+    inkcontrol = inkeditControl(stream)
+
+    print inkcontrol.property_values
+
+
+class ClassInfoPropMask(Mask):
+    """ClassInfoPropMask: [MS-OFORMS] 2.2.10.10.2"""
+    _size = 15
+    _read_size = 0
+    _names = ['fClsID', 'fDispEvent', 'Unused1', 'fDefaultProg',
+              'fClassFlags', 'fCountOfMethods', 'fDispidBind', 'fGetBindIndex', 'fPutBindIndex',
+              'fBindType', 'fGetValueIndex', 'fPutValueIndex', 'fValueType', 'fDispidRowset', 'fSetRowset']
+
+    def reset_read():
+        temp_read_size = _read_size
+        _read_size = 0
+        return temp_read_size
+
+    def consume(self, stream, props):
+        for (name, size) in props:
+            if self[name]:
+                stream.read(size)
+                _read_size += size
 
 
 # Functions from oletools.oleform that I patched to handle non-standard form controls;
@@ -139,10 +168,27 @@ def ExtendedStream__init__PATCHED(self, stream, path):
 
 
 def consume_SiteClassInfo_PATCHED(stream):
-   # SiteClassInfo: [MS-OFORMS] 2.2.10.10.1
-   stream.check_value('SiteClassInfo (version)', '<H', 2, 0)
-   cbClassTable = stream.unpack('<H', 2)
-   stream.classTable.append(stream.read(cbClassTable)[0x18:0x28]) # TODO learn how to parse cbClassTabe
+    # SiteClassInfo: [MS-OFORMS] 2.2.10.10.1
+    stream.check_value('SiteClassInfo (version)', '<H', 2, 0)
+    cbClassTable = stream.unpack('<H', 2)
+    with stream.will_jump_to(cbClassTable):
+        propMask = ClassInfoPropMask(stream.unpack(">L", 4))
+
+        # ClassInfoDataBlock: [MS-OFORMS] 2.2.10.10.3
+        propmask.consume(stream, [('ClassTableFlags', 2), ('VarFlags', 2), ('CountOfMethods', 4), 
+                                                                           ('DispidBind', 4), ('GetBinIndex', 2), ('PutBindindex', 2), 
+                                                                           ('BindType', 2), ('GetValueIndex', 2), ('PutValueIndex', 2), 
+                                                                           ('ValueType', 2)])
+        padding1_expected = propmask.reset_read() % 4
+        stream.read( padding1_expected) 
+        propmask.consume(stream, [('DispidRowset', 4), ('SetRowset', 2)])
+        padding2_expected = propmask.reset_read() % 4
+        stream.read( padding2_expected) 
+
+        # ClassInfoExtraDataBlock: [MS-OFORMS] 2.2.10.10.5
+        propmask.consume(stream, [('ClsID', 16), ('DispEvent', 16), ('DefaultProg', 16)])
+        if propmask['ClsID']:
+            stream.classTable.append(propmask['ClsID'])
 
 
 # Replace orginal functions with patched functions
