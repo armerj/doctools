@@ -42,56 +42,47 @@ class inkeditControl():
                      "ScrollBars" : ["0 - rtfNone", "1 - rtfHorizontal", "2 - rtfVertical", "3 - rtfBoth"]}
     
     inkedit_fields = [("version", "<h", 2), ("cbClassTable", "<h", 2), ("PropMask", "<i", 4), ("data_size", "<i", 4), 
-                                         ("unkown_1", "<i", 4), ("unkown_2", "<i", 4), ("width", "<i", 4), ("height", "<i", 4), 
-                                         ("backColor", "<i", 4), ("apperance", "<i", 4, "prop"), ("borderStyle", "<i", 4, "prop"), 
+                                         ("unkown_1", "<I", 4, "hex"), ("unkown_2", "<I", 4, "hex"), ("width", "<i", 4), ("height", "<i", 4), 
+                                         ("backColor", "<I", 4, "hex"), ("apperance", "<i", 4, "prop"), ("borderStyle", "<i", 4, "prop"), 
                                          ("MousePointer", "<i", 4, "prop"), ("InkMode", "<i", 4, "prop"), ("InkInsertMode", "<i", 4, "prop"),
                                          ("RecognTimeOut", "<i", 4), ("Locked", "<h", 2, "bool"), ("MultiLine", "<h", 2, "bool"), 
                                          ("disableNoScroll", "<h", 2, "bool"), ("padding", "<bb", 2), ("ScrollBars", "<i", 4, "prop"),
                                          ("Enabled", "<h", 2, "bool"), ("padding", "<bb", 2), ("MaxLength", "<i", 4), ("UseMouseForInput", "<h", 2, "bool"), 
                                          ("padding", "<bbbbbb", 6), ("factorid", "<i", 4, "unicode"), ("mouseIcon", "<i", 4, "image"),
-                                         ("font", "h", 4, "font"), ("rtf_data", "<i", 4, "rtf")]
+                                         ("font", "<i", 4, "font"), ("rtf_data", "<i", 4, "rtf")]
 
     property_values = {}
     
+
     def __init__(self, stream):
-        for field in inkedit_fields:
+        for field in self.inkedit_fields:
             field_value = stream.unpack(field[1], field[2])
             if len(field) == 3:
-                property_values[field[0]] = field_value
+                self.property_values[field[0]] = field_value
             else:
                 if field[3] == "bool":
-                    property_values[field[0]] = field_value > 0
+                    self.property_values[field[0]] = field_value > 0
                 if field[3] == "unicode":
-                   unicodedata = stream.read(field_value)
-                    property_values[field[0]] = unicodedata.replace("\x00", "")
+                    unicodedata = stream.read(field_value)
+                    self.property_values[field[0]] = unicodedata.replace("\x00", "")
                 elif field[3] == "prop":
-                    property_values[field[0]] = PROPERTY_LIST["apperance"][field_value]
+                    self.property_values[field[0]] = self.PROPERTY_LIST[field[0]][field_value]
                 elif field[3] == "font":
                     fontdata = stream.read(field_value)
-                    property_values["fontdata"] = fontdata
-                    fontname_size = struct.unpack(">h", field_value[9:11])[0]  # TODO add in font parsing
-                    property_values["fontname"] = field_value[11:11+fontname_size]
+                    self.property_values["fontdata"] = fontdata
+                    fontname_size = struct.unpack(">h", fontdata[9:11])[0]  # TODO add in font parsing
+                    self.property_values["fontname"] = fontdata[11:11+fontname_size]
                 elif field[3] == "rtf":
-                    rtf_data_size = stream.unpack("<i", 4)
-                    property_values["rtf_data"] = stream.read(rtf_data_size).replace("\x00", "") # remove null chars
-                    beginning_text = property_values["rtf_data"].find("\\fs16 ") + 6 # TODO add option to use actual RTF parser
-                    end_text = property_values["rtf_data"][beginning_text:].find("\\par")
-                    property_values["text"] = property_values["rtf_data"][beginning_text:beginning_text + end_text]
+                    self.property_values["rtf_data"] = stream.read(field_value).replace("\x00", "") # remove null chars
+                    beginning_text = self.property_values["rtf_data"].find("\\fs16 ") + 6 # TODO add option to use actual RTF parser
+                    end_text = self.property_values["rtf_data"][beginning_text:].find("\\par")
+                    self.property_values["text"] = self.property_values["rtf_data"][beginning_text:beginning_text + end_text]
                 elif field[3] == "image":
-                property_values[field[0]] = field_value
+                    if field_value > 0:
+                        self.property_values[field[0]] = stream.read(field_value)
+                elif field[3] == "hex":
+                    self.property_values[field[0]] = hex(field_value)
                     
-
-
-    rtf_data_size = stream.unpack("<i", 4)
-    inkedit_data["rtf_data"] = stream.read(rtf_data_size).replace("\x00", "") # remove null chars
-
-
-#     fontname_size = struct.unpack(">h", inkedit_data["font_data"][9:11])[0]
-#     inkedit_data["fontname"] = inkedit_data["font_data"][11:11+fontname_size]
-
-#    beginning_text = inkedit_data["rtf_data"].find("\\fs16 ") + 6 # TODO add option to use actual RTF parser
-#    end_text = inkedit_data["rtf_data"][beginning_text:].find("\\par")
-#    inkedit_data["text"] = inkedit_data["rtf_data"][beginning_text:beginning_text + end_text]
 
 def consume_inkeditControl(stream):
     # stream.check_values('LabelControl (versions)', '<BB', 2, (0, 2))
@@ -116,7 +107,6 @@ class ClassInfoPropMask(Mask):
     def consume(self, stream, props):
         for (name, size) in props:
             if self[name]:
-                stream.read(size)
                 _read_size += size
 
 
@@ -148,6 +138,7 @@ def extract_OleFormVariables_PATCHED(ole_file, stream_dir):
         elif var['ClsidCacheIndex'] == 57:
             consume_FormControl(data)
         elif var['ClsidCacheIndex'] > 0x7FFF:
+            #print control.classTable
             if control.classTable[var['ClsidCacheIndex'] - 0x8000] == "\xf5\x59\xca\xe5\xc4\x57\xd8\x4d\x9b\xd6\x1d\xee\xed\xd2\x7a\xf4":
                 consume_inkeditControl(data)
         else:
@@ -171,6 +162,8 @@ def consume_SiteClassInfo_PATCHED(stream):
     # SiteClassInfo: [MS-OFORMS] 2.2.10.10.1
     stream.check_value('SiteClassInfo (version)', '<H', 2, 0)
     cbClassTable = stream.unpack('<H', 2)
+    print "in"
+
     with stream.will_jump_to(cbClassTable):
         propMask = ClassInfoPropMask(stream.unpack(">L", 4))
 
@@ -180,10 +173,10 @@ def consume_SiteClassInfo_PATCHED(stream):
                                                                            ('BindType', 2), ('GetValueIndex', 2), ('PutValueIndex', 2), 
                                                                            ('ValueType', 2)])
         padding1_expected = propmask.reset_read() % 4
-        stream.read( padding1_expected) 
+        stream.read(padding1_expected if padding1_expected > 0 else 4) 
         propmask.consume(stream, [('DispidRowset', 4), ('SetRowset', 2)])
         padding2_expected = propmask.reset_read() % 4
-        stream.read( padding2_expected) 
+        stream.read(padding2_expected if padding2_expected > 0 else 4) 
 
         # ClassInfoExtraDataBlock: [MS-OFORMS] 2.2.10.10.5
         propmask.consume(stream, [('ClsID', 16), ('DispEvent', 16), ('DefaultProg', 16)])
@@ -196,13 +189,19 @@ consume_SiteClassInfo = consume_SiteClassInfo_PATCHED
 extract_OleFormVariables = extract_OleFormVariables_PATCHED
 ExtendedStream.__init__ = ExtendedStream__init__PATCHED
 
-my_argparser = argparse.ArgumentParser()
-my_argparser.add_argument("-f", "--file", type=str, help="Document to extract files from")
+if __name__ == "__main__":
+    print "test"
+    my_argparser = argparse.ArgumentParser()
+    my_argparser.add_argument("-f", "--file", type=str, help="Document to extract files from")
 
-args = my_argparser.parse_args()
+    args = my_argparser.parse_args()
 
-ole = olefile.OleFileIO(args.file)
+    ole = olefile.OleFileIO(args.file)
+    dirs = ole.listdir()
 
-# Call parser
-extract_OleFormVariables(ole, ['Macros','UserForm1'])
+    # Call parser
+    for dir in dirs:
+        if dir[-1] == "f" and (dir[:2] + ["o"]) in dirs:
+            print dir
+            extract_OleFormVariables(ole, dir[:2])
 
