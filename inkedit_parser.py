@@ -2,7 +2,7 @@
 
 __description__ = 'Parse Form Control data using oletools.oleform and print properties in /f for inkedit form controls'
 __author__ = 'Jon Armer'
-__version__ = '0.0.3'
+__version__ = '0.0.4'
 __date__ = '2020/02/09'
 
 """
@@ -19,9 +19,9 @@ $ python oleform_patched.py -f ../doc_inkedit/ink_default.doc
 
 History:
   2020/02/08: start
+  2020/02/12: Added cbClassTable Parser, and put inkedit parsing into class 
 
 Todo:
-    - Figureout how to parse cbClassTable
     - Make PR into oletools repo
     - Add option to use actual RTF parser
 """
@@ -29,6 +29,7 @@ Todo:
 import olefile
 from oletools.oleform import *
 import argparse
+from pprint import pprint
 
 class inkeditControl():
     PROPERTY_LIST = {"apperance" : ["0 - rtfFlat", "1 - rtfThreeD"], 
@@ -50,6 +51,8 @@ class inkeditControl():
                                          ("Enabled", "<h", 2, "bool"), ("padding", "<bb", 2), ("MaxLength", "<i", 4), ("UseMouseForInput", "<h", 2, "bool"), 
                                          ("padding", "<bbbbbb", 6), ("factorid", "<i", 4, "unicode"), ("mouseIcon", "<i", 4, "image"),
                                          ("font", "<i", 4, "font"), ("rtf_data", "<i", 4, "rtf")]
+    # Note: Padding is likely simliar to that in other MS-OFORMS objects, where data of 4 bytes needs to be align to offsets that are multiple of 4
+    # Though it looks like all fields are required here, so having hardcoded padding sizes should be ok 
 
     property_values = {}
     
@@ -82,13 +85,7 @@ class inkeditControl():
                         self.property_values[field[0]] = stream.read(field_value)
                 elif field[3] == "hex":
                     self.property_values[field[0]] = hex(field_value)
-                    
 
-def consume_inkeditControl(stream):
-    # stream.check_values('LabelControl (versions)', '<BB', 2, (0, 2))
-    inkcontrol = inkeditControl(stream)
-
-    print inkcontrol.property_values
 
 
 class ClassInfoPropMask(Mask):
@@ -99,15 +96,17 @@ class ClassInfoPropMask(Mask):
               'fClassFlags', 'fCountOfMethods', 'fDispidBind', 'fGetBindIndex', 'fPutBindIndex',
               'fBindType', 'fGetValueIndex', 'fPutValueIndex', 'fValueType', 'fDispidRowset', 'fSetRowset']
 
-    def reset_read():
-        temp_read_size = _read_size
-        _read_size = 0
+
+    def reset_read(self):
+        temp_read_size = self._read_size
+        self._read_size = 0
         return temp_read_size
 
     def consume(self, stream, props):
         for (name, size) in props:
             if self[name]:
-                _read_size += size
+                stream.read(size)
+                self._read_size += size
 
 
 # Functions from oletools.oleform that I patched to handle non-standard form controls;
@@ -140,7 +139,12 @@ def extract_OleFormVariables_PATCHED(ole_file, stream_dir):
         elif var['ClsidCacheIndex'] > 0x7FFF:
             #print control.classTable
             if control.classTable[var['ClsidCacheIndex'] - 0x8000] == "\xf5\x59\xca\xe5\xc4\x57\xd8\x4d\x9b\xd6\x1d\xee\xed\xd2\x7a\xf4":
-                consume_inkeditControl(data)
+                control_data = inkeditControl(data).property_values
+                var['raw_data'] = control_data
+                var['factorid'] = control_data['factorid']
+                var['rtf_data'] = control_data['rtf_data']
+                var['text'] = control_data['text']
+                var['non_ms_type'] = "InkEdit"
         else:
             # TODO: use logging instead of print
             print('ERROR: Unsupported stored type in user form: {0}'.format(str(var['ClsidCacheIndex'])))
@@ -162,36 +166,39 @@ def consume_SiteClassInfo_PATCHED(stream):
     # SiteClassInfo: [MS-OFORMS] 2.2.10.10.1
     stream.check_value('SiteClassInfo (version)', '<H', 2, 0)
     cbClassTable = stream.unpack('<H', 2)
-    print "in"
 
     with stream.will_jump_to(cbClassTable):
-        propMask = ClassInfoPropMask(stream.unpack(">L", 4))
+        temp = stream.unpack("<L", 4)
+        propmask = ClassInfoPropMask(temp)
 
         # ClassInfoDataBlock: [MS-OFORMS] 2.2.10.10.3
-        propmask.consume(stream, [('ClassTableFlags', 2), ('VarFlags', 2), ('CountOfMethods', 4), 
-                                                                           ('DispidBind', 4), ('GetBinIndex', 2), ('PutBindindex', 2), 
-                                                                           ('BindType', 2), ('GetValueIndex', 2), ('PutValueIndex', 2), 
-                                                                           ('ValueType', 2)])
+        propmask.consume(stream, [('fClassFlags', 2), ('fClassFlags', 2), # If fClassFlags is set then ClassTableFlags and VarFlags exists
+                                  ('fCountOfMethods', 4), ('fDispidBind', 4), ('fGetBindIndex', 2), 
+                                  ('fPutBindIndex', 2), ('fBindType', 2), ('fGetValueIndex', 2), ('fPutValueIndex', 2), 
+                                  ('fValueType', 2)])
+        
         padding1_expected = propmask.reset_read() % 4
-        stream.read(padding1_expected if padding1_expected > 0 else 4) 
-        propmask.consume(stream, [('DispidRowset', 4), ('SetRowset', 2)])
+        stream.read(padding1_expected)
+        propmask.consume(stream, [('fDispidRowset', 4), ('fSetRowset', 2)])
         padding2_expected = propmask.reset_read() % 4
-        stream.read(padding2_expected if padding2_expected > 0 else 4) 
+        stream.read(padding2_expected)
 
         # ClassInfoExtraDataBlock: [MS-OFORMS] 2.2.10.10.5
-        propmask.consume(stream, [('ClsID', 16), ('DispEvent', 16), ('DefaultProg', 16)])
-        if propmask['ClsID']:
-            stream.classTable.append(propmask['ClsID'])
+        if propmask['fClsID']:
+            clsid = stream.read(16)
+            stream.classTable.append(clsid)
+        propmask.consume(stream, [('fDispEvent', 16), ('fDefaultProg', 16)])
 
 
 # Replace orginal functions with patched functions
-consume_SiteClassInfo = consume_SiteClassInfo_PATCHED
+consume_FormControl.func_globals['consume_SiteClassInfo'] = consume_SiteClassInfo_PATCHED
 extract_OleFormVariables = extract_OleFormVariables_PATCHED
 ExtendedStream.__init__ = ExtendedStream__init__PATCHED
 
+
 if __name__ == "__main__":
-    print "test"
     my_argparser = argparse.ArgumentParser()
+    
     my_argparser.add_argument("-f", "--file", type=str, help="Document to extract files from")
 
     args = my_argparser.parse_args()
@@ -203,5 +210,7 @@ if __name__ == "__main__":
     for dir in dirs:
         if dir[-1] == "f" and (dir[:2] + ["o"]) in dirs:
             print dir
-            extract_OleFormVariables(ole, dir[:2])
-
+            controls = extract_OleFormVariables(ole, dir[:2])
+            for control in controls:
+                if "non_ms_type" in control and control["non_ms_type"] == "InkEdit":
+                    pprint(control)
