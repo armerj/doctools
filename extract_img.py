@@ -26,17 +26,43 @@ $ sha256sum test/5737761889ed2d709d00a65d84cfe4dee120c8c2d98054e5fff073652021aaa
 History:
   2019/12/01: start
   2020/01/10: Changed to standalone module, instead of plugin for oledump
+  2020/05/13: Added OCR using pytesseract
+  2020/05/21: Output Picture name and type. Use libreoffice if available to convert EMF/WMF to PNG for OCR
 
 Todo:
     - Test on other Microsoft Office files, only done DOC
+    - Option to print out records as they are parsed
     - Add in other shape records
     - Return shape name
+    - Convert to python 3
 """
 
-import struct
 import olefile
 import argparse
-from Crypto.Hash import SHA256
+import io
+import hashlib
+import zlib
+
+try:
+    import pytesseract
+    from PIL import Image
+    import binascii
+    import struct
+    import numpy as np
+    import scipy
+    import scipy.misc
+    import scipy.cluster
+#    from unidecode import unidecode
+
+    ENABLE_OCR = True
+except:
+    ENABLE_OCR = False
+
+try:
+    import subprocess
+    ENABLE_LIBREOFFICE = subprocess.call(['which', 'libreoffice']) == 0
+except:
+    ENABLE_LIBREOFFICE = False
 
 
 class extract_and_hash_image():
@@ -49,12 +75,13 @@ class extract_and_hash_image():
         self.stream = stream
         self.args = args
         self.save = self.args.savefolder
+        self.ocr = self.args.ocr
         self.index = 0
+        self.result = []
 
-	self.img_info = [] # TODO make dict when we can parse shape name and other info. 
+        self.img_info = [] # TODO make dict when we can parse shape name and other info. 
 
     def Analyze(self):
-        result = []
         curindex = 0
 
 
@@ -69,10 +96,10 @@ class extract_and_hash_image():
             if self.img_info:
                 self.ran = True
                 # for key, val in self.img_info: # when dict
-                for val in self.img_info:
-                    result.append("image sha256 hash is: {}".format(val))
+                # for val in self.img_info:
+                #    result.append("image sha256 hash is: {}".format(val))
 
-        return result
+        return self.result
 
     
     def read_byte(self): 
@@ -231,31 +258,87 @@ class extract_and_hash_image():
             nameData = ""
     
         rec_ver, recInstance, recType, recLen = self.parse_OfficeArtRecordHeader()
-        if recType == 0xf01a: 
-            image_data = self.parse_img_type_1(recInstance, recLen)
-        elif recType == 0xf01b: 
-            image_data = self.parse_img_type_1(recInstance, recLen)
-        elif recType == 0xf01c: 
-            image_data = self.parse_img_type_1(recInstance, recLen)
-        elif recType == 0xf01d or recType == 0xf02a: 
+        if recType == 0xf01a:
+            pic_type = "emf"
+            image_data, is_compressed = self.parse_img_type_1(recInstance, recLen)
+            if is_compressed:
+                image_data = zlib.decompress(image_data)
+        elif recType == 0xf01b:
+            pic_type = "wmf"
+            image_data, is_compressed = self.parse_img_type_1(recInstance, recLen)
+            if is_compressed:
+                image_data = zlib.decompress(image_data)
+        elif recType == 0xf01c:
+            pic_type = "pict"
+            image_data, is_compressed = self.parse_img_type_1(recInstance, recLen)
+            if is_compressed:
+                image_data = zlib.decompress(image_data)
+        elif recType == 0xf01d or recType == 0xf02a:
+            pic_type = "jpeg"
             image_data = self.parse_img_type_2(recInstance, recLen)
         elif recType == 0xf01e:
+            pic_type = "png"
             image_data = self.parse_img_type_2(recInstance, recLen)
         elif recType == 0xf01f:
+            pic_type = "dib"
             image_data = self.parse_img_type_2(recInstance, recLen)
         elif recType == 0xf029:
+            pic_type = "tiff"
             image_data = self.parse_img_type_2(recInstance, recLen)
     
-        img_hash = SHA256.new()
+        img_hash = hashlib.sha256()
         img_hash.update(image_data)
         self.img_info.append(img_hash.hexdigest())
+        freq_color = None
+        text = ""
+        save_loc = "{}/{}".format(self.save, img_hash.hexdigest())
+        # TODO add type of image found to log
 
         if self.save:  # TODO move to class method
-            with open("{}/{}".format(self.save, img_hash.hexdigest()), "w") as fo:
+            with open(save_loc, "w") as fo:
                 fo.write(image_data)
+        if self.ocr and ENABLE_OCR:
+            if recType > 0xf01c:
+                text, freq_color = extract_text(image_data, self.args.ocr_resize, self.args.ocr_no_preprocess)
+            elif ENABLE_LIBREOFFICE and (recType == 0xf01a or recType == 0xf01b):
+                # TODO use pillow if windows to convert image and read in
+                temp_image_name = "/tmp/extracted_img.{}".format(pic_type)
+                with open(temp_image_name, "w") as fo:
+                    fo.write(image_data)
+                subprocess.call(["libreoffice", "--headless", "--convert-to", "png", "--outdir", "//tmp", temp_image_name])
+                with open("/tmp/extracted_img.png") as fi:
+                    new_png = fi.read()
+                text, freq_color = extract_text(new_png, self.args.ocr_resize, self.args.ocr_no_preprocess)
+                if self.save:
+                    with open(save_loc + ".png", "w") as fo:
+                        fo.write(new_png)
 
-    
-        
+        self.result.append({"pic_name": nameData, "sha256": img_hash.hexdigest(), "ocr_text": text, "freq_color": freq_color,
+                            "suspious words": "enable content" in text.lower() or "enable editing" in text.lower(),
+                            "pic_type": pic_type})
+
+
+    def parse_OfficeArtMetafileHeader(self):
+        '''
+        parse_OfficeArtMetafileHeader is made up of
+            4 byte cbsize, uncompressed size
+            16 byte rcBounds, RECT structure that specifies the clipping region of the metafile
+            8 byte ptSize, POINT stucture that specidies the size in EMUs to render metafile
+            4 byte cbSave, compressed size
+            1 byte compression, 0x00 = DEFLATE, 0xFE = No compression
+            1 byte filter, must be 0xFE
+        '''
+        cbsize = self.read_dword()
+        rcBounds = self.read_bytes(16)
+        ptSize = self.read_bytes(8)
+        cbSave = self.read_dword()
+        compression = self.read_byte()
+        filter_byte = self.read_byte()
+
+        return cbSave, compression
+
+
+
     def parse_img_type_1(self, recInstance, recLen):
         '''
         A EMF, WMF, PICT record is made up of header and 
@@ -272,11 +355,11 @@ class extract_and_hash_image():
             recLen -= 16
             
         
-        OfficeArtMetafileHeader = self.read_bytes(34)
+        cbSave, compression = self.parse_OfficeArtMetafileHeader()
         
-        EMFFileData = self.read_bytes(recLen)
+        picData = self.read_bytes(cbSave)
     
-        return EMFFileData
+        return picData, compression == 0x00
         
     
     
@@ -375,16 +458,54 @@ class extract_and_hash_image():
         return "" # did not hit image data
 
 
+def extract_text(image_data, resize, no_preprocess):
+    img = Image.open(io.BytesIO(image_data))
+    if resize > 0:
+        img = img.resize((img.width * resize, img.height * resize))  # , resample=Image.BOX)
+    if not no_preprocess:
+        img, freq_color = img_convert_n_colors(2, img)  # TODO should probably move to own module
+    return pytesseract.image_to_string(img), freq_color  # TODO use unidecode
+
+
+def img_convert_n_colors(num_colors, img):
+    '''
+       Code slightly modified from Peter Hansen's answer on StackOverflow
+       https://stackoverflow.com/questions/3241929/python-find-dominant-most-common-color-in-an-image
+    '''
+    ar = np.asarray(img)
+    shape = ar.shape
+    ar = ar.reshape(scipy.product(shape[:2]), shape[2]).astype(float)
+
+    codes, dist = scipy.cluster.vq.kmeans(ar, num_colors)
+    vecs, dist = scipy.cluster.vq.vq(ar, codes)         # assign codes
+    counts, bins = scipy.histogram(vecs, len(codes))    # count occurrences
+
+    index_max = scipy.argmax(counts)                    # find most frequent
+    peak = codes[index_max]
+    colour = binascii.hexlify(bytearray(int(c) for c in peak)).decode('ascii')
+    c = ar.copy()
+    for i, code in enumerate(codes):
+        c[scipy.r_[scipy.where(vecs==i)],:] = code
+    return Image.fromarray(c.reshape(*shape).astype(np.uint8)), (peak, colour)
+    
+
 my_argparser = argparse.ArgumentParser()
-my_argparser.add_argument("-s", "--savefolder", type=str, help="Folder to save images to")
+my_argparser.add_argument("-s", "--savefolder", type=str, help="Folder to save images to", default="")
 my_argparser.add_argument("-f", "--file", type=str, help="Document to extract files from")
+my_argparser.add_argument("-o", "--ocr", action='store_true', help="Run OCR on image", default=False)
+my_argparser.add_argument("--ocr-no-preprocess", action='store_true', help="Do not run preprocessing on image", default=False)
+my_argparser.add_argument("--ocr-resize", type=int, help="Resize image to X before preprocessing, 0 means don't resize", default=2)
+
 
 args = my_argparser.parse_args()
+
+if args.ocr and not ENABLE_OCR:
+    print("OCR requires pytesseract and Pillow")
 
 ole = olefile.OleFileIO(args.file)
 with ole.openstream(['Data']) as data_stream:
     data = data_stream.read()
 
 img_processor = extract_and_hash_image(data, args)
-print img_processor.Analyze()
+print(img_processor.Analyze())
 
