@@ -42,12 +42,12 @@ import argparse
 import io
 import hashlib
 import zlib
+import struct
 
 try:
     import pytesseract
     from PIL import Image
     import binascii
-    import struct
     import numpy as np
     import scipy
     import scipy.misc
